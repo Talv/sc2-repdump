@@ -1,0 +1,8 @@
+*.pyc
+*.egg-info
+/__pycache__
+/build
+/dist
+/out
+.vscode/
+s2repdump.spec
