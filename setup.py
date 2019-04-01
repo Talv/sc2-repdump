@@ -4,7 +4,7 @@ from distutils.core import setup
 
 setup(
     name='s2repdump',
-    version='0.1.0',
+    version='0.2.0',
     author='Talv',
     url='https://github.com/Talv/s2repdump',
     packages=['s2repdump'],

@@ -1,9 +1,12 @@
-#!/usr/bin/env python2
+#!/usr/bin/python2
+# -*- coding: utf-8 -*-
 
+from __future__ import print_function
 import sys
 import os
 import json
 import argparse
+import logging
 import mpyq
 from s2protocol import versions
 import xml.etree.ElementTree as ET
@@ -81,10 +84,10 @@ class SC2Bank(object):
             f.write(pxml)
 
 
-def read_contents(archive, content):
+def readArchiveContents(archive, content):
     contents = archive.read_file(content)
     if not contents:
-        print('Error: Archive missing {}'.format(content))
+        logging.critical('Archive missing file: "%s"' % content)
         sys.exit(1)
     return contents
 
@@ -111,14 +114,46 @@ def reconstruct_banks(gameevents, player_id):
     return banks
 
 
-def read_players(details):
-    p_map = {}
-    for x in details['m_playerList']:
-        p_map[x['m_workingSetSlotId']] = {
-            'name': x['m_name'],
-            'handle': '%d-S2-%d-%d' % (x['m_toon']['m_region'], x['m_toon']['m_realm'], x['m_toon']['m_id']),
-        }
-    return p_map
+def read_players(initd, details):
+    working_slots = {}
+
+    for slot_id, row in enumerate(initd['m_syncLobbyState']['m_lobbyState']['m_slots']):
+        # if slot is FREE (0) or NOT AVAILABLE (1)
+        if row['m_control'] <= 1:
+            continue
+
+        pslot = dict(
+            player_id=slot_id + 1,
+        )
+        working_slots[row['m_workingSetSlotId']] = pslot
+
+        if row['m_userId'] is not None:
+            user_data = initd['m_syncLobbyState']['m_userInitialData'][row['m_userId']]
+            pslot['user_id'] = row['m_userId']
+            pslot['name'] = user_data['m_name']
+            pslot['clan'] = user_data['m_clanTag']
+
+    for row in details['m_playerList']:
+        pslot = working_slots[row['m_workingSetSlotId']]
+        pslot['handle'] = '%d-S2-%d-%d' % (row['m_toon']['m_region'], row['m_toon']['m_realm'], row['m_toon']['m_id'])
+
+    return working_slots
+
+
+def setupLogger():
+    logging.basicConfig(
+        format='%(asctime)s,%(msecs)-3d %(levelname)s [%(funcName)s]: %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    logging._levelNames[logging.DEBUG] = 'DEBG'
+    logging._levelNames[logging.WARNING] = 'WARN'
+    logging._levelNames[logging.ERROR] = 'ERRO'
+    logging._levelNames[logging.CRITICAL] = 'CRIT'
+    logging.addLevelName(logging.DEBUG, "\033[1;35m%s\033[1;0m" % logging.getLevelName(logging.DEBUG))
+    logging.addLevelName(logging.INFO, "\033[1;32m%s\033[1;0m" % logging.getLevelName(logging.INFO))
+    logging.addLevelName(logging.WARNING, "\033[1;33m%s\033[1;0m" % logging.getLevelName(logging.WARNING))
+    logging.addLevelName(logging.ERROR, "\033[1;31m%s\033[1;0m" % logging.getLevelName(logging.ERROR))
+    logging.addLevelName(logging.CRITICAL, "\033[1;41m%s\033[1;0m" % logging.getLevelName(logging.CRITICAL))
 
 
 def main():
@@ -133,15 +168,20 @@ def main():
         ''',
         formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument('replay_file', help='.SC2Replay file to load', nargs='?')
+    parser.add_argument('replay_file', help='.SC2Replay file to load')
     parser.add_argument('--players', help='print info about players', action='store_true')
+    parser.add_argument('--chat', help='chat messages', action='store_true')
+    parser.add_argument('--json', help='json', action='store_true')
     parser.add_argument('--bank', help='reconstruct player\'s SC2Bank files', type=int)
     parser.add_argument('--out', help='output directory', type=str, default='./out')
+    parser.add_argument('-v', '--verbose', help='verbose logging', action='store_true')
     args = parser.parse_args()
 
-    if args.replay_file is None:
-        print(".SC2Replay file not specified")
-        sys.exit(1)
+    setupLogger()
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+    else:
+        logging.getLogger().setLevel(logging.INFO)
 
     archive = mpyq.MPQArchive(args.replay_file)
 
@@ -153,24 +193,53 @@ def main():
     baseBuild = header['m_version']['m_baseBuild']
     try:
         protocol = versions.build(baseBuild)
-    except Exception, e:
-        print('Unsupported base build: {0} ({1})'.format(baseBuild, str(e)))
+    except Exception as e:
+        logging.warn('Unsupported base build: %s (%s)' % (baseBuild, str(e)))
         protocol = versions.latest()
-        print('Attempting to use newest possible instead: %s' % protocol.__name__)
+        logging.warn('Attempting to use newest possible instead: %s' % protocol.__name__)
 
-    contents = read_contents(archive, 'replay.details')
-    details = protocol.decode_replay_details(contents)
-    p_map = read_players(details)
+    details = protocol.decode_replay_details(readArchiveContents(archive, 'replay.details'))
+    initd = protocol.decode_replay_initdata(readArchiveContents(archive, 'replay.initData'))
+
+    playerList = read_players(initd, details)
+    userList = {}
+    for slotId in playerList:
+        if 'user_id' in playerList[slotId]:
+            userList[playerList[slotId]['user_id']] = playerList[slotId]
 
     if args.players:
-        print(json.dumps(p_map, indent=True))
+        print(json.dumps(playerList, indent=True))
+
+    if args.chat:
+        messageevents = protocol.decode_replay_message_events(readArchiveContents(archive, 'replay.message.events'))
+        clog = []
+        for ev in messageevents:
+            if ev['_event'] == 'NNet.Game.SChatMessage':
+                clog.append({
+                    'gameloop': ev['_gameloop'],
+                    'user_id': ev['_userid']['m_userId'],
+                    'recipient': ev['m_recipient'],
+                    'message': ev['m_string'],
+                })
+        if args.json:
+            print(json.dumps(clog, indent=True))
+        else:
+            for x in clog:
+                secs = x['gameloop'] / 16
+                print('[%d:%02d:%02d] %s: %s' % (
+                    secs / 3600,
+                    secs % 3600 / 60,
+                    secs % 60,
+                    userList[x['user_id']]['name'],
+                    x['message']
+                ))
 
     if args.bank is not None:
-        print('Processing player "%s"' % p_map[args.bank]['name'])
-        contents = read_contents(archive, 'replay.game.events')
-        banks = reconstruct_banks(protocol.decode_replay_game_events(contents), args.bank)
+        logging.info('Processing player "%s"' % userList[args.bank]['name'])
+        gameevents = protocol.decode_replay_game_events(readArchiveContents(archive, 'replay.game.events'))
+        banks = reconstruct_banks(gameevents, args.bank)
         for b in banks:
-            print('Reconstructed "%s.SC2Bank"' % b.name)
+            logging.info('Reconstructed "%s.SC2Bank"' % b.name)
             b.write(args.out)
 
 
