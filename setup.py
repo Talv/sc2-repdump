@@ -1,19 +1,24 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 
 from distutils.core import setup
+from s2repdump.types import S2REPDUMP_VERSION
 
 setup(
     name='s2repdump',
-    version='0.2.0',
+    version=S2REPDUMP_VERSION,
     author='Talv',
     url='https://github.com/Talv/s2repdump',
     packages=['s2repdump'],
     entry_points={
         'console_scripts': [
-            's2repdump=s2repdump.main:main',
+            's2repdump=s2repdump.main:cli',
         ]
     },
+    python_requires='>=3.6',
     install_requires=[
-        's2protocol'
+        's2protocol',
+        'tabulate',
+        'colorlog',
+        'more-itertools',
     ],
 )
