@@ -246,7 +246,7 @@ class S2Replay:
             tmp = [abs(i - self.proto_build) for i in proto_mods]
             idx = tmp.index(min(tmp))
             # always favorize newer protos in case of up to date replays
-            if self.proto_build > 70000 and len(proto_mods) == (idx + 1):
+            if self.proto_build > 70000 and len(proto_mods) >= (idx + 2):
                 idx += 1
             fallbackBuild = proto_mods[idx]
             self.protocol = versions.build(fallbackBuild)
