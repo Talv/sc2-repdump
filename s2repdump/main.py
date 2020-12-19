@@ -399,7 +399,7 @@ def rebuild_bank(gbank: GameBank, target_dir):
         key_curr = ET.Element('Key')
         key_curr.set('name', name)
         sc_curr.append(key_curr)
-        if kind:
+        if kind != None:
             enter_value(key_curr, kind, value)
         return key_curr
 
