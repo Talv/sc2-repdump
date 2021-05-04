@@ -3,187 +3,26 @@
 import sys
 import os
 import re
+import json
+from binascii import b2a_hex
 from typing import List
-from collections import OrderedDict, Iterable
 import argparse
 import logging
-import xml.etree.ElementTree as ET
-from xml.dom import minidom
 from more_itertools import peekable
 from tabulate import tabulate
 from colorlog import ColoredFormatter
 import mpyq
 from s2protocol import versions
-from s2repdump.types import S2REPDUMP_VERSION, enum, resource
+from s2repdump.meta import S2REPDUMP_VERSION
+from s2repdump.utils import resource
+from s2repdump.types import *
+from s2repdump.bank import GameBankStorage
 
 
-@enum
-class EPlayerControl:
-    OPEN     = 0
-    CLOSED   = 1
-    HUMAN    = 2
-    COMPUTER = 3
-
-
-@enum
-class EObserve:
-    NONE      = 0
-    SPECTATOR = 1
-    REFEREE   = 2
-
-
-@enum
-class EGameSpeed:
-    SLOWER = 0
-    SLOW   = 1
-    NORMAL = 2
-    FAST   = 3
-    FASTER = 4
-
-
-@enum
-class EMessageRecipient:
-    ALL        = 0
-    ALLIES     = 1
-    INDIVIDUAL = 2
-    BATTLENET  = 3
-    OBSERVERS  = 4
-
-
-@enum
-class EBankValueKind:
-    FIXED  = 0
-    FLAG   = 1
-    INT    = 2
-    STRING = 3
-    POINT  = 4
-    UNIT   = 5
-    TEXT   = 6
-    SKIP   = 7
-
-
-COLOR_CODES = {
-    "B4141E": "Red",
-    "0042FF": "Blue",
-    "1CA7EA": "Teal",
-    "EBE129": "Yellow",
-    "540081": "Purple",
-    "FE8A0E": "Orange",
-    "168000": "Green",
-    "CCA6FC": "Light Pink",
-    "1F01C9": "Violet",
-    "525494": "Light Grey",
-    "106246": "Dark Green",
-    "4E2A04": "Brown",
-    "96FF91": "Light Green",
-    "232323": "Dark Grey",
-    "E55BB0": "Pink",
-    "FFFFFF": "White",
-    "000000": "Black",
+PROTO_VERSION_MAPPINGS = {
+    # 4.12.X
+    80188: 79998,
 }
-
-
-@resource
-class PlayerColor:
-    def __init__(self, *components):
-        self.r = components[0]
-        self.g = components[1]
-        self.b = components[2]
-        self.a = components[3]
-
-    def hex(self):
-        return f'{self.r:02X}{self.g:02X}{self.b:02X}'
-
-    def __str__(self):
-        return COLOR_CODES.get(self.hex(), f'#{self.hex()}')
-
-
-@resource
-class GameParticipant:
-    idx: int = None
-    pid: int = None
-    uid: int = None
-    name: str = None
-    clan: str = None
-    ctrl: int = None
-    toon: str = None
-    working_slot: int = None
-    color: PlayerColor = None
-
-    def __init__(self):
-        pass
-
-
-@resource
-class GameBank:
-    name: str
-    net_size: int = 0
-    content_size: int = 0
-    sections_count: int = 0
-    keys_count: int = 0
-    signed: bool = False
-
-    def __init__(self, name, player: GameParticipant):
-        self.name = name
-        self.player = player
-        self.events = []
-
-    def append_event(self, ev):
-        self.events.append(ev)
-
-        if ev['_event'] == 'NNet.Game.SBankSectionEvent':
-            self.sections_count += 1
-        elif ev['_event'] == 'NNet.Game.SBankKeyEvent':
-            self.keys_count += 1
-            self.content_size += len(ev['m_name'])
-            if ev['m_type'] != 7:
-                self.content_size += len(ev['m_data'])
-        elif ev['_event'] == 'NNet.Game.SBankValueEvent':
-            self.content_size += len(ev['m_data'])
-        elif ev['_event'] == 'NNet.Game.SBankSignatureEvent' and ev['m_signature']:
-            self.signed = True
-
-        self.net_size += ev['_bits'] / 8
-
-
-@resource
-class ProtoFeatures:
-    user_id_driven: bool
-    working_slots: bool
-    tracker_present: bool
-    tracker_player_pid: bool
-
-    def puid_from_ev(self, ev):
-        return ev['_userid']['m_userId'] if self.user_id_driven else ev['_playerid']['m_playerId']
-
-
-@resource
-class GameParticipantsList(list):
-    def __init__(self, features: ProtoFeatures):
-        super().__init__(self)
-        self.features = features
-
-    def get_player(self, puid=None, uid=None, pid=None, slot_id=None):
-        if puid is not None:
-            if self.features.user_id_driven:
-                uid = puid
-            else:
-                pid = puid
-
-        if uid is not None:
-            return next(filter(lambda x: x.uid == uid, self))
-        elif pid is not None:
-            return next(filter(lambda x: x.pid == pid, self))
-        elif slot_id is not None:
-            return next(filter(lambda x: x.working_slot == slot_id, self))
-        else:
-            raise Exception()
-
-    def get_player_by_uid(self, uid):
-        return next(filter(lambda x: x.uid == uid, self))
-
-    def get_player_by_pid(self, pid):
-        return next(filter(lambda x: x.pid == pid, self))
 
 
 @resource
@@ -196,10 +35,11 @@ class S2Replay:
     details: dict
     init_data: dict
 
+    info: ReplayInfo
     participants: GameParticipantsList
-    banks: List[GameBank]
+    banks: List[GameBankMeta]
 
-    def __init__(self, filename, strict_mode=False):
+    def __init__(self, filename, strict=False):
         def read_archive_contents(name):
             content = self.archive.read_file(name)
             if not content:
@@ -238,17 +78,20 @@ class S2Replay:
             self.protocol = versions.build(self.proto_build)
         except ImportError as e:
             logging.warning('Unsupported protocol: (%s)' % (str(e)))
-            if strict_mode:
+            if strict:
                 logging.critical('Aborting, because of strict mode.')
                 sys.exit(1)
 
-            proto_mods = [int(re.sub(r'^protocol([0-9]+)\.py$', '\\1', x)) for x in versions.list_all()]
-            tmp = [abs(i - self.proto_build) for i in proto_mods]
-            idx = tmp.index(min(tmp))
-            # always favorize newer protos in case of up to date replays
-            if self.proto_build > 70000 and len(proto_mods) >= (idx + 2):
-                idx += 1
-            fallbackBuild = proto_mods[idx]
+            try:
+                fallbackBuild = PROTO_VERSION_MAPPINGS[self.proto_build]
+            except KeyError:
+                proto_mods = [int(re.sub(r'^protocol([0-9]+)\.py$', '\\1', x)) for x in versions.list_all()]
+                tmp = [abs(i - self.proto_build) for i in proto_mods]
+                idx = tmp.index(min(tmp))
+                # always favorize newer protos in case of up to date replays
+                if self.proto_build > 70000 and len(proto_mods) >= (idx + 2):
+                    idx += 1
+                fallbackBuild = proto_mods[idx]
             self.protocol = versions.build(fallbackBuild)
             logging.warning('Attempting to use %s instead' % self.protocol.__name__)
 
@@ -263,8 +106,35 @@ class S2Replay:
         self.trackerevents = peekable(self.protocol.decode_replay_tracker_events(content) if content else None)
 
         # setup
+        self.info = setup_info(self)
         self.participants = setup_participants(self)
         self.banks = setup_banks(self)
+
+
+def setup_info(s2rep: S2Replay):
+    info = ReplayInfo()
+    info.title = s2rep.details['m_title'].decode('utf8')
+    info.client_version = '.'.join([
+        str(s2rep.header['m_version']['m_major']),
+        str(s2rep.header['m_version']['m_minor']),
+        str(s2rep.header['m_version']['m_revision']),
+        str(s2rep.header['m_version']['m_build']),
+    ])
+    info.region = None
+    info.timestamp = int((s2rep.details['m_timeUTC'] / 10000000) - 11644473600)
+    info.elapsed_game_loops = s2rep.header['m_elapsedGameLoops']
+
+    info.map_info = MapInfo()
+    info.map_info.cache_handles = [*map(
+        # lambda x: '%s.%s' % (b2a_hex(x[16:]).decode(), x[0:4].decode('ascii')),
+        lambda x: '%s' % (b2a_hex(x[16:]).decode()),
+        s2rep.details['m_cacheHandles']
+    )]
+    info.map_info.author_handle = s2rep.init_data['m_syncLobbyState']['m_gameDescription']['m_mapAuthorName'].decode() or None
+    if info.map_info.author_handle:
+        info.region = int(info.map_info.author_handle[0])
+
+    return info
 
 
 def setup_participants(s2rep: S2Replay):
@@ -279,7 +149,10 @@ def setup_participants(s2rep: S2Replay):
         pinfo.idx = key + 1
 
         if dp_entry['m_control'] == EPlayerControl.HUMAN:
-            pinfo.toon = '%d-S2-%d-%d' % (dp_entry['m_toon']['m_region'], dp_entry['m_toon']['m_realm'], dp_entry['m_toon']['m_id'])
+            if dp_entry['m_toon']['m_region']:
+                pinfo.handle = '%d-S2-%d-%d' % (dp_entry['m_toon']['m_region'], dp_entry['m_toon']['m_realm'], dp_entry['m_toon']['m_id'])
+            else:
+                pinfo.handle = None
         pinfo.ctrl = EPlayerControl[dp_entry['m_control']]
 
         if dp_entry['m_name']:
@@ -297,6 +170,7 @@ def setup_participants(s2rep: S2Replay):
             if dp_entry['m_workingSetSlotId'] is None:
                 # entry without a "working" slot in the lobby might indicate:
                 # - game recovered from replay - where particuplar player was either replaced or excluded
+                # - game started without lobby (test document mode etc.)
                 # - a referee or an observer ??
                 # - player that dropped from the game before it has even started ??
                 logging.warning('"%s" has no working slot assigned' % (pinfo.name))
@@ -332,12 +206,16 @@ def setup_participants(s2rep: S2Replay):
             if ev['_event'] != 'NNet.Replay.Tracker.SPlayerSetupEvent': break
             ev = next(s2rep.trackerevents)
             if ev['m_slotId'] is None: continue
-            plist.get_player(slot_id=ev['m_slotId']).pid = ev['m_playerId']
+            p = plist.get_player(slot_id=ev['m_slotId'])
+            if p is None:
+                logging.warning('Failed to match a slot_id of %d with a pid of %d' % (ev['m_slotId'], ev['m_playerId']))
+                continue
+            p.pid = ev['m_playerId']
 
     return plist
 
 
-def setup_banks(s2rep: S2Replay) -> List[GameBank]:
+def setup_banks(s2rep: S2Replay) -> List[GameBankMeta]:
     BANK_EVENTS = [
         'NNet.Game.SBankFileEvent',
         'NNet.Game.SBankSectionEvent',
@@ -346,7 +224,7 @@ def setup_banks(s2rep: S2Replay) -> List[GameBank]:
         'NNet.Game.SBankSignatureEvent',
     ]
 
-    banks = OrderedDict()
+    banks = {}
 
     for x in s2rep.participants:
         if s2rep.features.user_id_driven:
@@ -362,7 +240,7 @@ def setup_banks(s2rep: S2Replay) -> List[GameBank]:
 
             if ev['_event'] == 'NNet.Game.SBankFileEvent':
                 player = s2rep.participants.get_player(puid)
-                banks[puid].append(GameBank(ev['m_name'].decode('ascii'), player))
+                banks[puid].append(GameBankMeta(ev['m_name'].decode('ascii'), player))
 
             banks[puid][-1].append_event(ev)
         else:
@@ -378,144 +256,167 @@ def setup_banks(s2rep: S2Replay) -> List[GameBank]:
     return tmpl
 
 
-def rebuild_bank(gbank: GameBank, target_dir):
-    dkinds = [
-        'fixed',
-        'flag',
-        'int',
-        'string',
-        None, # TODO: point
-        None, # TODO: unit
-        'text',
-        None, # skip
-    ]
-
-    def enter_section(name):
-        sc_curr = ET.Element('Section')
-        sc_curr.set('name', name)
-        return sc_curr
-
-    def enter_key(sc_curr, name, kind=None, value=None):
-        key_curr = ET.Element('Key')
-        key_curr.set('name', name)
-        sc_curr.append(key_curr)
-        if kind != None:
-            enter_value(key_curr, kind, value)
-        return key_curr
-
-    def enter_value(key_curr, kind, value):
-        el = ET.Element('Value')
-        if kind == 7:
-            # skip - value will be in the next message
-            return
-        attr = dkinds[kind]
-        el.set(attr, value.decode('utf8'))
-        key_curr.append(el)
-
-    def enter_signature(signature):
-        el = ET.Element('Signature', {'value': ''.join('{:02X}'.format(x) for x in signature)})
-        return el
-
-    sc_curr = None # type: ET.Element
-    key_curr = None # type: ET.Element
-    root = ET.Element('Bank')
-    root.set('version', '1')
-
-    # process events
-    for ev in gbank.events:
-        if ev['_event'] == 'NNet.Game.SBankSectionEvent':
-            sc_curr = enter_section(ev['m_name'].decode('utf8'))
-            root.append(sc_curr)
-        elif ev['_event'] == 'NNet.Game.SBankKeyEvent':
-            key_curr = enter_key(sc_curr, ev['m_name'].decode('utf8'), ev['m_type'], ev['m_data'])
-        elif ev['_event'] == 'NNet.Game.SBankValueEvent':
-            enter_value(key_curr, ev['m_type'], ev['m_data'])
-        elif ev['_event'] == 'NNet.Game.SBankSignatureEvent':
-            sig_el = enter_signature(ev['m_signature'])
-            root.append(sig_el)
-
-    # write to disk
-    target_dir = os.path.abspath(os.path.join(target_dir, gbank.player.toon))
-    try:
-        os.makedirs(target_dir)
-    except OSError:
-        if not os.path.isdir(target_dir):
-            raise
-    filename = '%s.SC2Bank' % os.path.join(target_dir, gbank.name)
-    btree = ET.ElementTree(root)
-    btree.write(filename, encoding='utf-8', xml_declaration=True)
-
-    # beautify the content by rewriting it through minidom
-    pxml = minidom.parse(filename).toprettyxml(encoding='utf-8', indent=" " * 4, newl="\r\n")
-    with open(filename, 'wb') as f:
-        f.write(pxml)
-
-    return filename
-
-
 def main(args):
-    s2rep = S2Replay(args.replay_file, strict_mode=args.strict_mode)
+    s2rep = S2Replay(args.replay_file, strict=args.strict)
+    sections = {}
 
-    if args.players:
+    if 'info' in args.decode:
+        if args.json:
+            sections['info'] = s2rep.info
+        else:
+            data = []
+            def append_prop(val, key_path: str = ''):
+                if hasattr(val, 'props'):
+                    for sub_key in val.props:
+                        append_prop(val[sub_key], f'{key_path}.{sub_key}'.lstrip('.'))
+                elif isinstance(val, list):
+                    if len(val) == 0:
+                        append_prop(None, f'{key_path}[]')
+                    for i, x in enumerate(val):
+                        append_prop(x, f'{key_path}[{i}]')
+                else:
+                    r = None
+                    if isinstance(val, (int, str, bool)):
+                        r = val
+                    elif val is not None:
+                        r = str(val)
+                    data.append([key_path, r])
+                    return r
+            append_prop(s2rep.info)
+
+            print("\n## REPLAY INFO\n")
+            print(tabulate(data, tablefmt='github'))
+            print()
+
+    if 'players' in args.decode:
         hdkeys = GameParticipant.props
 
         data = []
         for x in s2rep.participants:
             data.append([x[key] for key in hdkeys])
 
-        print("\n## PLAYERS\n")
-        print(tabulate(data, headers=hdkeys, tablefmt='github'))
-        print()
+        if args.json:
+            sections['players'] = []
+            for row in data:
+                item = {}
+                for [col, name] in enumerate(hdkeys):
+                    item[name] = row[col]
+                sections['players'].append(item)
+        else:
+            print("\n## PLAYERS\n")
+            print(tabulate(data, headers=hdkeys, tablefmt='github'))
+            print()
 
 
-    if args.chat and s2rep.messageevents:
-        print("\n## CHATLOG\n")
+    if 'chat' in args.decode and s2rep.messageevents:
+        sections['chat'] = []
+        if not args.json:
+            print("\n## CHATLOG\n")
         for ev in s2rep.messageevents:
             if ev['_event'] != 'NNet.Game.SChatMessage': continue
 
             if '_userid' in ev:
-                name = s2rep.participants.get_player_by_uid(ev['_userid']['m_userId']).name
+                participant = s2rep.participants.get_player_by_uid(ev['_userid']['m_userId'])
             elif '_playerid' in ev:
-                name = s2rep.participants.get_player_by_pid(ev['_playerid']['m_playerId']).name
+                participant = s2rep.participants.get_player_by_pid(ev['_playerid']['m_playerId'])
             else:
                 raise Exception('couldn\'t determine user')
 
             secs = ev['_gameloop'] / 16
+            msg = ev['m_string'].decode('utf8', 'replace')
 
-            print('%s | %06s | %-s: %s' % (
-                '%d:%02d:%02d' % (secs / 3600, secs % 3600 / 60, secs % 60),
-                EMessageRecipient[ev['m_recipient']],
-                name,
-                ev['m_string'].decode('utf8', 'replace')
-            ))
-        print()
+            if args.json:
+                sections['chat'].append({
+                    'gameloop': ev['_gameloop'],
+                    'uid': participant.uid,
+                    'recipient': EMessageRecipient[ev['m_recipient']].lower(),
+                    'message': msg,
+                })
+            else:
+                print('%s | %06s | %-s: %s' % (
+                    '%d:%02d:%02d' % (secs / 3600, secs % 3600 / 60, secs % 60),
+                    EMessageRecipient[ev['m_recipient']],
+                    participant.name,
+                    msg
+                ))
+        if not args.json:
+            print()
 
 
-    if args.bank_list:
-        hdkeys = ['idx', 'uid', 'player'] + GameBank.props
-        data = []
-        for i, cbank in enumerate(s2rep.banks):
-            data.append([
-                i,
-                cbank.player.uid,
-                cbank.player.name,
-            ] + [cbank[key] for key in GameBank.props])
-        print("\n## BANKS\n")
-        print(tabulate(data, headers=hdkeys, tablefmt='github'))
-        print()
+    if 'banks' in args.decode:
+        if args.json:
+            sections['banks'] = s2rep.banks
+        else:
+            hdkeys = ['idx', 'player'] + GameBankMeta.props
+            data = []
+            for i, cbank in enumerate(s2rep.banks):
+                data.append([
+                    i,
+                    cbank.player.name,
+                ] + [cbank[key] for key in GameBankMeta.props])
+            print("\n## BANKS\n")
+            print(tabulate(data, headers=hdkeys, tablefmt='github'))
+            print()
 
 
     if args.bank_rebuild:
-        for currb in s2rep.banks:
-            pname = currb.player.name
-            logging.info(f'Rebuilding "{currb.name}.SC2Bank" for player "{pname}" ..')
-            filename = rebuild_bank(currb, args.out)
-            logging.debug(f'File saved at "{filename}"')
+        if args.json:
+            sections['sc2banks'] = []
+
+        if not args.json and not args.force and os.path.isdir(args.out) and len(os.listdir(args.out)) > 0:
+            logging.error('Specified output directory "%s" already exists and is not empty, aborting..' % (args.out))
+        else:
+            for gbmeta in s2rep.banks:
+                pname = '%s' % (gbmeta.player.name)
+                if gbmeta.player.handle:
+                    pname += ' [%s]' % (gbmeta.player.handle)
+                logging.info(f'Rebuilding "{gbmeta.name}.SC2Bank" for player {pname} ..')
+                bank_store = GameBankStorage()
+                bank_store.rebuild_from_meta(gbmeta)
+
+                expected_signature = bank_store.signature()
+                computed_signature = bank_store.compute_signature(s2rep.info.map_info.author_handle, gbmeta.player.handle)
+                if expected_signature is not None and expected_signature != computed_signature:
+                    logging.warning(
+                        'Signature missmatch for player: %s bank: %s! expected: %s computed: %s',
+                        pname,
+                        bank_store.name,
+                        expected_signature,
+                        computed_signature
+                    )
+
+                if args.json:
+                    sections['sc2banks'].append({
+                        'uid': gbmeta.player.uid,
+                        'name': bank_store.name,
+                        'expected_signature': expected_signature,
+                        'computed_signature': computed_signature,
+                        'filename': bank_store.filename(s2rep.info.map_info.author_handle, gbmeta.player.handle),
+                        'content': bank_store.tostring(not args.json_compact),
+                    })
+                else:
+                    filename = bank_store.write_sc2bank(args.out, True, s2rep.info.map_info.author_handle, gbmeta.player.handle)
+                    logging.debug(f'File saved at "{filename}"')
+
+    if args.json:
+        def dumper(obj):
+            if hasattr(obj, 'toJSON'):
+                return obj.toJSON()
+            if isinstance(obj, bytes):
+                return obj.decode('utf8')
+            else:
+                return obj.__dict__
+        print(json.dumps(
+            sections,
+            default=dumper,
+            indent=None if args.json_compact else '\t',
+            separators=(',', ':') if args.json_compact else (',', ': ')
+        ))
 
 
 def setup_logger():
     logFormatter = ColoredFormatter(
-        "%(asctime)s,%(msecs)-3d %(log_color)s%(levelname)-8s%(reset)s %(blue)s%(funcName)s/%(filename)s:%(lineno)s%(reset)s %(message)s",
+        "%(asctime)s,%(msecs)-3d %(log_color)s%(levelname)-8s%(reset)s %(blue)s%(filename)s:%(lineno)s%(reset)s %(message)s",
         datefmt='%H:%M:%S',
         reset=True,
         log_colors={
@@ -534,23 +435,30 @@ def setup_logger():
 
 
 def cli():
+    ver = ('%s (s2protocol %s)' % (S2REPDUMP_VERSION, versions.latest().__name__[8:]))
     parser = argparse.ArgumentParser(
         prog='s2repdump',
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument('replay_file', help='.SC2Replay file to load')
-    parser.add_argument('-v', '--verbose', help='verbose logging; stacks up to 3', action='count', default=0)
-    parser.add_argument('-q', '--quiet', action='store_true')
-    parser.add_argument('--version', action='version', version='%(prog)s ' +
-                        ('%s (s2protocol %s)' % (S2REPDUMP_VERSION, versions.latest().__name__[8:])))
-    # parser.add_argument('--json', help='json', action='store_true')
-    parser.add_argument('--players', help='print info about players', action='store_true')
-    parser.add_argument('--chat', help='chat messages', action='store_true')
-    parser.add_argument('--bank-list', help='list SC2Bank\'s', action='store_true')
-    parser.add_argument('--bank-rebuild', help='rebuild SC2Bank files', action='store_true')
-    parser.add_argument('--out', help='output directory', type=str, default='./out')
-    parser.add_argument('--strict-mode', help='do not try to decode replays if there\'s not matching protocol', action='store_true')
+
+    comg = parser.add_argument_group('common')
+    comg.add_argument('-v', '--verbose', help='verbose logging; stacks up to 3', action='count', default=0)
+    comg.add_argument('-q', '--quiet', action='store_true')
+    comg.add_argument('-V', '--version', action='version', version='%(prog)s ' + ver)
+    comg.add_argument('-j', '--json', help='output data as JSON', action='store_true')
+    comg.add_argument('-J', '--json-compact', help='output data as compact JSON', action='store_true')
+    comg.add_argument('-O', '--out', help='output directory', type=str, default='./out')
+    comg.add_argument('-f', '--force', action='store_true', help='force certain operations that otherwise would\'ve been aborted - such overwriting existing files')
+    comg.add_argument('--strict', help='do not try to decode replays if there\'s not matching protocol', action='store_true')
+
+    comg = parser.add_argument_group('actions')
+    comg.add_argument('-d', '--decode', choices=['info', 'players', 'chat', 'banks'], type=str, action='append', default=[], help='decode and output specified data section')
+    comg.add_argument('-R', '--bank-rebuild', help='rebuild SC2Bank files', action='store_true')
+
     args = parser.parse_args()
+    if args.json_compact:
+        args.json = True
     args.verbose = min(args.verbose, 3)
 
     setup_logger()
@@ -560,7 +468,11 @@ def cli():
     if args.quiet:
         logging.getLogger().setLevel(logging.CRITICAL)
 
-    main(args)
+    try:
+        main(args)
+    except:
+        logging.exception('Unexpected error occured')
+        sys.exit(1)
 
 
 if __name__ == '__main__':

@@ -4,5 +4,6 @@
 /build
 /dist
 /out
+/test_replays
 .vscode/
 s2repdump.spec

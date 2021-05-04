@@ -23,22 +23,29 @@ pip install https://github.com/Talv/sc2-repdump/archive/master.zip
 It's command line tool.
 
 ```
-usage: s2repdump [-h] [-v] [-q] [--version] [--players] [--chat] [--bank-list] [--bank-rebuild] [--out OUT] [--strict-mode] replay_file
+usage: s2repdump [-h] [-v] [-q] [-V] [-j] [-J] [-O OUT] [-f] [--strict] [-d {info,players,chat,banks}] [-R]
+                 replay_file
 
 positional arguments:
-  replay_file     .SC2Replay file to load
+  replay_file           .SC2Replay file to load
 
 optional arguments:
-  -h, --help      show this help message and exit
-  -v, --verbose   verbose logging; stacks up to 3
+  -h, --help            show this help message and exit
+
+common:
+  -v, --verbose         verbose logging; stacks up to 3
   -q, --quiet
-  --version       show program's version number and exit
-  --players       print info about players
-  --chat          chat messages
-  --bank-list     list SC2Bank's
-  --bank-rebuild  rebuild SC2Bank files
-  --out OUT       output directory
-  --strict-mode   do not try to decode replays if there's not matching protocol
+  -V, --version         show program's version number and exit
+  -j, --json            output data as JSON
+  -J, --json-compact    output data as compact JSON
+  -O OUT, --out OUT     output directory
+  -f, --force           force certain operations that otherwise would've been aborted - such overwriting existing files
+  --strict              do not try to decode replays if there's not matching protocol
+
+actions:
+  -d {info,players,chat,banks}, --decode {info,players,chat,banks}
+                        decode and output specified data section
+  -R, --bank-rebuild    rebuild SC2Bank files
 ```
 
 ## Examples
@@ -46,7 +53,7 @@ optional arguments:
 **Dump list of the players**
 
 ```js
-$ s2repdump --players --bank-list IBE2\ 41m1s\ Aduolu\ LaZator\ lethern\ Talv\ Adimax\ Slavez\ abdol\ Joakinho\ DruNkenPandA\ 2017-06-02\ 20_23_51.SC2Replay
+$ s2repdump -d players -d banks --bank-list IBE2.SC2Replay
 
 ## PLAYERS
 
@@ -101,45 +108,15 @@ $ s2repdump --players --bank-list IBE2\ 41m1s\ Aduolu\ LaZator\ lethern\ Talv\ A
 **Reconstruct `.SC2Bank` files**
 
 ```js
-$ s2repdump -v --bank-rebuild IBE2\ 41m1s\ Aduolu\ LaZator\ lethern\ Talv\ Adimax\ Slavez\ abdol\ Joakinho\ DruNkenPandA\ 2017-06-02\ 20_23_51.SC2Replay
-01:32:10,653 INFO     __init__/main.py:222 Protocol build 53644
-01:32:11,486 INFO     main/main.py:511 Rebuilding "IBE2statsBAK.SC2Bank" for player "Aduolu" ..
-01:32:11,525 INFO     main/main.py:511 Rebuilding "IBEops.SC2Bank" for player "Aduolu" ..
-01:32:11,525 INFO     main/main.py:511 Rebuilding "IBE2stats.SC2Bank" for player "Aduolu" ..
-01:32:11,564 INFO     main/main.py:511 Rebuilding "ZCampaignStats.SC2Bank" for player "Aduolu" ..
-01:32:11,606 INFO     main/main.py:511 Rebuilding "ZArchive.SC2Bank" for player "Aduolu" ..
-01:32:11,606 INFO     main/main.py:511 Rebuilding "IBE2statsBAK.SC2Bank" for player "LaZator" ..
-01:32:11,644 INFO     main/main.py:511 Rebuilding "IBEops.SC2Bank" for player "LaZator" ..
-01:32:11,645 INFO     main/main.py:511 Rebuilding "IBE2stats.SC2Bank" for player "LaZator" ..
-01:32:11,684 INFO     main/main.py:511 Rebuilding "IBE2stats.SC2Bank" for player "lethern" ..
-01:32:11,733 INFO     main/main.py:511 Rebuilding "IBE2statsBAK.SC2Bank" for player "lethern" ..
-01:32:11,765 INFO     main/main.py:511 Rebuilding "IBEops.SC2Bank" for player "lethern" ..
-01:32:11,766 INFO     main/main.py:511 Rebuilding "IBE2stats.SC2Bank" for player "Talv" ..
-01:32:11,814 INFO     main/main.py:511 Rebuilding "IBE2statsBAK.SC2Bank" for player "Talv" ..
-01:32:11,881 INFO     main/main.py:511 Rebuilding "IBEops.SC2Bank" for player "Talv" ..
-01:32:11,882 INFO     main/main.py:511 Rebuilding "IBE2statsBAK.SC2Bank" for player "Adimax" ..
-01:32:11,929 INFO     main/main.py:511 Rebuilding "IBEops.SC2Bank" for player "Adimax" ..
-01:32:11,929 INFO     main/main.py:511 Rebuilding "IBE2stats.SC2Bank" for player "Adimax" ..
-01:32:11,994 INFO     main/main.py:511 Rebuilding "IBE2stats.SC2Bank" for player "Slavez" ..
-01:32:11,995 INFO     main/main.py:511 Rebuilding "IBEops.SC2Bank" for player "Slavez" ..
-01:32:11,996 INFO     main/main.py:511 Rebuilding "IBE2statsBAK.SC2Bank" for player "Slavez" ..
-01:32:11,997 INFO     main/main.py:511 Rebuilding "IBE2statsBAK.SC2Bank" for player "abdol" ..
-01:32:12,11  INFO     main/main.py:511 Rebuilding "IBEops.SC2Bank" for player "abdol" ..
-01:32:12,12  INFO     main/main.py:511 Rebuilding "IBE2stats.SC2Bank" for player "abdol" ..
-01:32:12,27  INFO     main/main.py:511 Rebuilding "IBE2statsBAK.SC2Bank" for player "Joakinho" ..
-01:32:12,65  INFO     main/main.py:511 Rebuilding "IBE2stats.SC2Bank" for player "Joakinho" ..
-01:32:12,124 INFO     main/main.py:511 Rebuilding "IBEops.SC2Bank" for player "Joakinho" ..
-01:32:12,124 INFO     main/main.py:511 Rebuilding "IBE2statsBAK.SC2Bank" for player "DruNkenPandA" ..
-01:32:12,172 INFO     main/main.py:511 Rebuilding "IBEops.SC2Bank" for player "DruNkenPandA" ..
-01:32:12,173 INFO     main/main.py:511 Rebuilding "IBE2stats.SC2Bank" for player "DruNkenPandA" ..
+$ s2repdump --bank-rebuild IBE2.SC2Replay
 ```
 
 Result:
 
 ```js
-$ ls -Th
+$ exa -Th
 .
-├── IBE2 41m1s Aduolu LaZator lethern Talv Adimax Slavez abdol Joakinho DruNkenPandA 2017-06-02 20_23_51.SC2Replay
+├── IBE2.SC2Replay
 └── out
    ├── 2-S2-1-430056
    │  ├── IBE2stats.SC2Bank

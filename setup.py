@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 from distutils.core import setup
-from s2repdump.types import S2REPDUMP_VERSION
+from s2repdump.meta import S2REPDUMP_VERSION
 
 setup(
     name='s2repdump',
